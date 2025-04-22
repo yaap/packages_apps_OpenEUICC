@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import android.text.method.PasswordTransformationMethod
 import android.view.LayoutInflater
@@ -37,8 +38,10 @@ import im.angry.openeuicc.util.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 
 open class EuiccManagementFragment : Fragment(), EuiccProfilesChangedListener,
@@ -54,6 +57,7 @@ open class EuiccManagementFragment : Fragment(), EuiccProfilesChangedListener,
     private lateinit var fab: FloatingActionButton
     private lateinit var profileList: RecyclerView
     private var logicalSlotId: Int = -1
+    private lateinit var eid: String
 
     private val adapter = EuiccProfileAdapter()
 
@@ -130,30 +134,41 @@ open class EuiccManagementFragment : Fragment(), EuiccProfilesChangedListener,
         inflater.inflate(R.menu.fragment_euicc, menu)
     }
 
-    override fun onOptionsItemSelected(item: MenuItem): Boolean =
-        when (item.itemId) {
-            R.id.show_notifications -> {
-                if (logicalSlotId != -1) {
-                    Intent(requireContext(), NotificationsActivity::class.java).apply {
-                        putExtra("logicalSlotId", logicalSlotId)
-                        startActivity(this)
-                    }
-                }
-                true
-            }
+    override fun onPrepareOptionsMenu(menu: Menu) {
+        super.onPrepareOptionsMenu(menu)
+        menu.findItem(R.id.show_notifications).isVisible =
+            logicalSlotId != -1
+        menu.findItem(R.id.euicc_info).isVisible =
+            logicalSlotId != -1
+        menu.findItem(R.id.euicc_memory_reset).isVisible =
+            runBlocking { preferenceRepository.euiccMemoryResetFlow.first() }
+    }
 
-            R.id.euicc_info -> {
-                if (logicalSlotId != -1) {
-                    Intent(requireContext(), EuiccInfoActivity::class.java).apply {
-                        putExtra("logicalSlotId", logicalSlotId)
-                        startActivity(this)
-                    }
-                }
-                true
+    override fun onOptionsItemSelected(item: MenuItem) = when (item.itemId) {
+        R.id.show_notifications -> {
+            Intent(requireContext(), NotificationsActivity::class.java).apply {
+                putExtra("logicalSlotId", logicalSlotId)
+                startActivity(this)
             }
-
-            else -> super.onOptionsItemSelected(item)
+            true
         }
+
+        R.id.euicc_info -> {
+            Intent(requireContext(), EuiccInfoActivity::class.java).apply {
+                putExtra("logicalSlotId", logicalSlotId)
+                startActivity(this)
+            }
+            true
+        }
+
+        R.id.euicc_memory_reset -> {
+            EuiccMemoryResetFragment.newInstance(slotId, portId, eid)
+                .show(childFragmentManager, EuiccMemoryResetFragment.TAG)
+            true
+        }
+
+        else -> super.onOptionsItemSelected(item)
+    }
 
     protected open suspend fun onCreateFooterViews(
         parent: ViewGroup,
@@ -191,6 +206,7 @@ open class EuiccManagementFragment : Fragment(), EuiccProfilesChangedListener,
 
         val profiles = withEuiccChannel { channel ->
             logicalSlotId = channel.logicalSlotId
+            eid = channel.lpa.eID
             euiccChannelManager.notifyEuiccProfilesChanged(channel.logicalSlotId)
             if (unfilteredProfileListFlow.value)
                 channel.lpa.profiles
@@ -227,11 +243,7 @@ open class EuiccManagementFragment : Fragment(), EuiccProfilesChangedListener,
                 portId,
                 iccid,
                 enable,
-                reconnectTimeoutMillis = if (isUsb) {
-                    0
-                } else {
-                    30 * 1000
-                }
+                reconnectTimeoutMillis = 30 * 1000
             ).waitDone()
 
             when (err) {
@@ -261,7 +273,7 @@ open class EuiccManagementFragment : Fragment(), EuiccProfilesChangedListener,
                         invalid = true
                         // Timed out waiting for SIM to come back online, we can no longer assume that the LPA is still valid
                         AlertDialog.Builder(requireContext()).apply {
-                            setMessage(R.string.enable_disable_timeout)
+                            setMessage(appContainer.customizableTextProvider.profileSwitchingTimeoutMessage)
                             setPositiveButton(android.R.string.ok) { dialog, _ ->
                                 dialog.dismiss()
                                 requireActivity().finish()
@@ -348,7 +360,8 @@ open class EuiccManagementFragment : Fragment(), EuiccProfilesChangedListener,
             iccid.setOnLongClickListener {
                 requireContext().getSystemService(ClipboardManager::class.java)!!
                     .setPrimaryClip(ClipData.newPlainText("iccid", iccid.text))
-                Toast.makeText(requireContext(), R.string.toast_iccid_copied, Toast.LENGTH_SHORT)
+                if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.S_V2) Toast
+                    .makeText(requireContext(), R.string.toast_iccid_copied, Toast.LENGTH_SHORT)
                     .show()
                 true
             }

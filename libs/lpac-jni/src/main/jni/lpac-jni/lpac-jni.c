@@ -28,7 +28,7 @@ jint JNI_OnLoad(JavaVM *vm, void *reserved) {
     string_constructor = (*env)->GetMethodID(env, string_class, "<init>",
                                              "([BLjava/lang/String;)V");
 
-    const char _unused[1];
+    const jchar _unused[1];
     empty_string = (*env)->NewString(env, _unused, 0);
     empty_string = (*env)->NewGlobalRef(env, empty_string);
 
@@ -37,17 +37,30 @@ jint JNI_OnLoad(JavaVM *vm, void *reserved) {
 
 JNIEXPORT jlong JNICALL
 Java_net_typeblog_lpac_1jni_LpacJni_createContext(JNIEnv *env, jobject thiz,
+                                                  jbyteArray isdr_aid,
                                                   jobject apdu_interface,
                                                   jobject http_interface) {
     struct lpac_jni_ctx *jni_ctx = NULL;
     struct euicc_ctx *ctx = NULL;
+    jbyte *isdr_java = NULL;
+    uint32_t isdr_len = 0;
+    uint8_t *isdr_c = NULL;
 
     ctx = calloc(1, sizeof(struct euicc_ctx));
     jni_ctx = calloc(1, sizeof(struct lpac_jni_ctx));
+
+    isdr_java = (*env)->GetByteArrayElements(env, isdr_aid, JNI_FALSE);
+    isdr_len = (*env)->GetArrayLength(env, isdr_aid);
+    isdr_c = calloc(isdr_len, sizeof(uint8_t));
+    memcpy(isdr_c, isdr_java, isdr_len);
+    (*env)->ReleaseByteArrayElements(env, isdr_aid, isdr_java, JNI_ABORT);
+
     ctx->apdu.interface = &lpac_jni_apdu_interface;
     ctx->http.interface = &lpac_jni_http_interface;
     jni_ctx->apdu_interface = (*env)->NewGlobalRef(env, apdu_interface);
     jni_ctx->http_interface = (*env)->NewGlobalRef(env, http_interface);
+    ctx->aid = (const uint8_t *) isdr_c;
+    ctx->aid_len = isdr_len;
     ctx->userdata = (void *) jni_ctx;
     return (jlong) ctx;
 }
@@ -60,6 +73,7 @@ Java_net_typeblog_lpac_1jni_LpacJni_destroyContext(JNIEnv *env, jobject thiz, jl
     (*env)->DeleteGlobalRef(env, jni_ctx->apdu_interface);
     (*env)->DeleteGlobalRef(env, jni_ctx->http_interface);
     free(jni_ctx);
+    free((void *) ctx->aid);
     free(ctx);
 }
 
@@ -205,16 +219,16 @@ Java_net_typeblog_lpac_1jni_LpacJni_es10cDisableProfile(JNIEnv *env, jobject thi
 
 JNIEXPORT jint JNICALL
 Java_net_typeblog_lpac_1jni_LpacJni_es10cSetNickname(JNIEnv *env, jobject thiz, jlong handle,
-                                                     jstring iccid, jstring nick) {
+                                                     jstring iccid, jbyteArray nick) {
     struct euicc_ctx *ctx = (struct euicc_ctx *) handle;
     const char *_iccid = NULL;
-    const char *_nick = NULL;
+    jbyte *_nick = NULL;
     int ret;
 
     _iccid = (*env)->GetStringUTFChars(env, iccid, NULL);
-    _nick = (*env)->GetStringUTFChars(env, nick, NULL);
-    ret = es10c_set_nickname(ctx, _iccid, _nick);
-    (*env)->ReleaseStringUTFChars(env, nick, _nick);
+    _nick = (*env)->GetByteArrayElements(env, nick, NULL);
+    ret = es10c_set_nickname(ctx, _iccid, (const char *) _nick);
+    (*env)->ReleaseByteArrayElements(env, nick, _nick, JNI_ABORT);
     (*env)->ReleaseStringUTFChars(env, iccid, _iccid);
     return ret;
 }
@@ -266,6 +280,7 @@ void lpac_jni_euiccinfo2_free(struct es10c_ex_euiccinfo2 *info) {
 
 LPAC_JNI_STRUCT_GETTER_NULL_TERM_LIST_NEXT(char*, stringArr)
 LPAC_JNI_STRUCT_FREE(struct es10c_ex_euiccinfo2, euiccInfo2, lpac_jni_euiccinfo2_free)
+LPAC_JNI_STRUCT_GETTER_STRING(struct es10c_ex_euiccinfo2, euiccInfo2, svn, SGP22Version)
 LPAC_JNI_STRUCT_GETTER_STRING(struct es10c_ex_euiccinfo2, euiccInfo2, profileVersion, ProfileVersion)
 LPAC_JNI_STRUCT_GETTER_STRING(struct es10c_ex_euiccinfo2, euiccInfo2, euiccFirmwareVer, EuiccFirmwareVersion)
 LPAC_JNI_STRUCT_GETTER_STRING(struct es10c_ex_euiccinfo2, euiccInfo2, globalplatformVersion, GlobalPlatformVersion)

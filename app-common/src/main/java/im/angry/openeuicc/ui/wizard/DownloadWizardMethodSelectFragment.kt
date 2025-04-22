@@ -1,5 +1,7 @@
 package im.angry.openeuicc.ui.wizard
 
+import android.app.AlertDialog
+import android.content.ClipboardManager
 import android.graphics.BitmapFactory
 import android.os.Bundle
 import android.view.LayoutInflater
@@ -7,6 +9,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.ImageView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.DividerItemDecoration
@@ -39,21 +42,16 @@ class DownloadWizardMethodSelectFragment : DownloadWizardActivity.DownloadWizard
         registerForActivityResult(ActivityResultContracts.GetContent()) { result ->
             if (result == null) return@registerForActivityResult
 
-            lifecycleScope.launch(Dispatchers.IO) {
-                runCatching {
-                    requireContext().contentResolver.openInputStream(result)?.let { input ->
-                        val bmp = BitmapFactory.decodeStream(input)
-                        input.close()
-
-                        decodeQrFromBitmap(bmp)?.let {
-                            withContext(Dispatchers.Main) {
-                                processLpaString(it)
-                            }
+            lifecycleScope.launch {
+                val decoded = withContext(Dispatchers.IO) {
+                    runCatching {
+                        requireContext().contentResolver.openInputStream(result)?.use { input ->
+                            BitmapFactory.decodeStream(input).use(::decodeQrFromBitmap)
                         }
-
-                        bmp.recycle()
                     }
                 }
+
+                decoded.getOrNull()?.let { processLpaString(it) }
             }
         }
 
@@ -66,6 +64,9 @@ class DownloadWizardMethodSelectFragment : DownloadWizardActivity.DownloadWizard
         },
         DownloadMethod(R.drawable.ic_gallery_black, R.string.download_wizard_method_gallery) {
             gallerySelectorLauncher.launch("image/*")
+        },
+        DownloadMethod(R.drawable.ic_paste_go, R.string.download_wizard_method_clipboard) {
+            handleLoadFromClipboard()
         },
         DownloadMethod(R.drawable.ic_edit, R.string.download_wizard_method_manual) {
             gotoNextFragment(DownloadWizardDetailsFragment())
@@ -102,22 +103,53 @@ class DownloadWizardMethodSelectFragment : DownloadWizardActivity.DownloadWizard
         return view
     }
 
-    private fun processLpaString(s: String) {
-        val components = s.split("$")
-        if (components.size < 3 || components[0] != "LPA:1") return
-        state.smdp = components[1]
-        state.matchingId = components[2]
-        gotoNextFragment(DownloadWizardDetailsFragment())
+    private fun handleLoadFromClipboard() {
+        val clipboard = requireContext().getSystemService(ClipboardManager::class.java)
+        val text = clipboard.primaryClip?.getItemAt(0)?.text
+
+        if (text == null) {
+            Toast.makeText(
+                requireContext(),
+                R.string.profile_download_no_lpa_string,
+                Toast.LENGTH_SHORT
+            ).show()
+            return
+        }
+
+        processLpaString(text.toString())
     }
 
-    private class DownloadMethodViewHolder(private val root: View) : ViewHolder(root) {
+    private fun processLpaString(input: String) {
+        try {
+            val parsed = LPAString.parse(input)
+            state.smdp = parsed.address
+            state.matchingId = parsed.matchingId
+            state.confirmationCodeRequired = parsed.confirmationCodeRequired
+            gotoNextFragment(DownloadWizardDetailsFragment())
+        } catch (e: IllegalArgumentException) {
+            AlertDialog.Builder(requireContext()).apply {
+                setTitle(R.string.profile_download_incorrect_lpa_string)
+                setMessage(R.string.profile_download_incorrect_lpa_string_message)
+                setCancelable(true)
+                setNegativeButton(android.R.string.cancel, null)
+                show()
+            }
+        }
+    }
+
+    private inner class DownloadMethodViewHolder(private val root: View) : ViewHolder(root) {
         private val icon = root.requireViewById<ImageView>(R.id.download_method_icon)
         private val title = root.requireViewById<TextView>(R.id.download_method_title)
 
         fun bind(item: DownloadMethod) {
             icon.setImageResource(item.iconRes)
             title.setText(item.titleRes)
-            root.setOnClickListener { item.onClick() }
+            root.setOnClickListener {
+                // If the user elected to use another download method, reset the confirmation code flag
+                // too
+                state.confirmationCodeRequired = false
+                item.onClick()
+            }
         }
     }
 

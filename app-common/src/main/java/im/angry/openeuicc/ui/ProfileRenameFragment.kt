@@ -7,6 +7,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.ProgressBar
 import android.widget.Toast
+import androidx.annotation.StringRes
 import androidx.appcompat.widget.Toolbar
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.textfield.TextInputLayout
@@ -14,19 +15,20 @@ import im.angry.openeuicc.common.R
 import im.angry.openeuicc.service.EuiccChannelManagerService.Companion.waitDone
 import im.angry.openeuicc.util.*
 import kotlinx.coroutines.launch
+import net.typeblog.lpac_jni.LocalProfileAssistant
 
 class ProfileRenameFragment : BaseMaterialDialogFragment(), EuiccChannelFragmentMarker {
     companion object {
+        private const val FIELD_ICCID = "iccid"
+        private const val FIELD_CURRENT_NAME = "currentName"
+
         const val TAG = "ProfileRenameFragment"
 
-        fun newInstance(slotId: Int, portId: Int, iccid: String, currentName: String): ProfileRenameFragment {
-            val instance = newInstanceEuicc(ProfileRenameFragment::class.java, slotId, portId)
-            instance.requireArguments().apply {
-                putString("iccid", iccid)
-                putString("currentName", currentName)
+        fun newInstance(slotId: Int, portId: Int, iccid: String, currentName: String) =
+            newInstanceEuicc(ProfileRenameFragment::class.java, slotId, portId) {
+                putString(FIELD_ICCID, iccid)
+                putString(FIELD_CURRENT_NAME, currentName)
             }
-            return instance
-        }
     }
 
     private lateinit var toolbar: Toolbar
@@ -34,6 +36,14 @@ class ProfileRenameFragment : BaseMaterialDialogFragment(), EuiccChannelFragment
     private lateinit var progress: ProgressBar
 
     private var renaming = false
+
+    private val iccid: String by lazy {
+        requireArguments().getString(FIELD_ICCID)!!
+    }
+
+    private val currentName: String by lazy {
+        requireArguments().getString(FIELD_CURRENT_NAME)!!
+    }
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -53,6 +63,7 @@ class ProfileRenameFragment : BaseMaterialDialogFragment(), EuiccChannelFragment
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+        profileRenameNewName.editText!!.setText(currentName)
         toolbar.apply {
             setTitle(R.string.rename)
             setNavigationOnClickListener {
@@ -63,11 +74,6 @@ class ProfileRenameFragment : BaseMaterialDialogFragment(), EuiccChannelFragment
                 true
             }
         }
-    }
-
-    override fun onStart() {
-        super.onStart()
-        profileRenameNewName.editText!!.setText(requireArguments().getString("currentName"))
     }
 
     override fun onResume() {
@@ -81,35 +87,44 @@ class ProfileRenameFragment : BaseMaterialDialogFragment(), EuiccChannelFragment
         }
     }
 
-    private fun rename() {
-        val name = profileRenameNewName.editText!!.text.toString().trim()
-        if (name.length >= 64) {
-            Toast.makeText(context, R.string.toast_profile_name_too_long, Toast.LENGTH_LONG).show()
-            return
-        }
+    private fun showErrorAndCancel(@StringRes resId: Int) {
+        Toast.makeText(requireContext(), resId, Toast.LENGTH_LONG).show()
 
+        renaming = false
+        progress.visibility = View.GONE
+    }
+
+    private fun rename() {
         renaming = true
         progress.isIndeterminate = true
         progress.visibility = View.VISIBLE
 
+        val newName = profileRenameNewName.editText!!.text.toString().trim()
+
         lifecycleScope.launch {
             ensureEuiccChannelManager()
             euiccChannelManagerService.waitForForegroundTask()
-            euiccChannelManagerService.launchProfileRenameTask(
-                slotId,
-                portId,
-                requireArguments().getString("iccid")!!,
-                name
-            ).waitDone()
+            val response = euiccChannelManagerService
+                .launchProfileRenameTask(slotId, portId, iccid, newName).waitDone()
 
-            if (parentFragment is EuiccProfilesChangedListener) {
-                (parentFragment as EuiccProfilesChangedListener).onEuiccProfilesChanged()
-            }
+            when (response) {
+                is LocalProfileAssistant.ProfileNameTooLongException -> {
+                    showErrorAndCancel(R.string.profile_rename_too_long)
+                }
 
-            try {
-                dismiss()
-            } catch (e: IllegalStateException) {
-                // Ignored
+                is LocalProfileAssistant.ProfileNameIsInvalidUTF8Exception -> {
+                    showErrorAndCancel(R.string.profile_rename_encoding_error)
+                }
+
+                is Throwable -> {
+                    showErrorAndCancel(R.string.profile_rename_failure)
+                }
+
+                else -> {
+                    parentFragment?.notifyEuiccProfilesChanged()
+
+                    runCatching(::dismiss)
+                }
             }
         }
     }

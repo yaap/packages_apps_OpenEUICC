@@ -1,18 +1,27 @@
 package im.angry.openeuicc.ui.wizard
 
+import android.app.assist.AssistContent
 import android.os.Bundle
 import android.view.View
+import android.view.WindowManager
+import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.ProgressBar
+import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
+import androidx.core.net.toUri
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.updatePadding
 import androidx.fragment.app.Fragment
+import androidx.lifecycle.lifecycleScope
 import im.angry.openeuicc.common.R
+import im.angry.openeuicc.core.EuiccChannelManager
 import im.angry.openeuicc.ui.BaseEuiccAccessActivity
 import im.angry.openeuicc.util.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import net.typeblog.lpac_jni.LocalProfileAssistant
 
 class DownloadWizardActivity: BaseEuiccAccessActivity() {
@@ -26,6 +35,8 @@ class DownloadWizardActivity: BaseEuiccAccessActivity() {
         var downloadStarted: Boolean,
         var downloadTaskID: Long,
         var downloadError: LocalProfileAssistant.ProfileDownloadException?,
+        var skipMethodSelect: Boolean,
+        var confirmationCodeRequired: Boolean,
     )
 
     private lateinit var state: DownloadWizardState
@@ -54,16 +65,20 @@ class DownloadWizardActivity: BaseEuiccAccessActivity() {
         })
 
         state = DownloadWizardState(
-            null,
-            intent.getIntExtra("selectedLogicalSlot", 0),
-            "",
-            null,
-            null,
-            null,
-            false,
-            -1,
-            null
+            currentStepFragmentClassName = null,
+            selectedLogicalSlot = intent.getIntExtra("selectedLogicalSlot", 0),
+            smdp = "",
+            matchingId = null,
+            confirmationCode = null,
+            imei = null,
+            downloadStarted = false,
+            downloadTaskID = -1,
+            downloadError = null,
+            skipMethodSelect = false,
+            confirmationCodeRequired = false,
         )
+
+        handleDeepLink()
 
         progressBar = requireViewById(R.id.progress)
         nextButton = requireViewById(R.id.download_wizard_next)
@@ -84,6 +99,7 @@ class DownloadWizardActivity: BaseEuiccAccessActivity() {
             val bars = insets.getInsets(
                 WindowInsetsCompat.Type.systemBars()
                         or WindowInsetsCompat.Type.displayCutout()
+                        or WindowInsetsCompat.Type.ime()
             )
             v.updatePadding(bars.left, 0, bars.right, bars.bottom)
             val newParams = navigation.layoutParams
@@ -103,6 +119,35 @@ class DownloadWizardActivity: BaseEuiccAccessActivity() {
         }
     }
 
+    private fun handleDeepLink() {
+        // If we get an LPA string from deep-link intents, extract from there.
+        // Note that `onRestoreInstanceState` could override this with user input,
+        // but that _is_ the desired behavior.
+        val uri = intent.data
+        if (uri?.scheme == "lpa") {
+            val parsed = LPAString.parse(uri.schemeSpecificPart)
+            state.smdp = parsed.address
+            state.matchingId = parsed.matchingId
+            state.confirmationCodeRequired = parsed.confirmationCodeRequired
+            state.skipMethodSelect = true
+        }
+    }
+
+    override fun onProvideAssistContent(outContent: AssistContent?) {
+        super.onProvideAssistContent(outContent)
+        outContent?.webUri = try {
+            val activationCode = LPAString(
+                state.smdp,
+                state.matchingId,
+                null,
+                state.confirmationCode != null,
+            )
+            "LPA:$activationCode".toUri()
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putString("currentStepFragmentClassName", state.currentStepFragmentClassName)
@@ -113,6 +158,7 @@ class DownloadWizardActivity: BaseEuiccAccessActivity() {
         outState.putString("imei", state.imei)
         outState.putBoolean("downloadStarted", state.downloadStarted)
         outState.putLong("downloadTaskID", state.downloadTaskID)
+        outState.putBoolean("confirmationCodeRequired", state.confirmationCodeRequired)
     }
 
     override fun onRestoreInstanceState(savedInstanceState: Bundle) {
@@ -129,9 +175,13 @@ class DownloadWizardActivity: BaseEuiccAccessActivity() {
         state.downloadStarted =
             savedInstanceState.getBoolean("downloadStarted", state.downloadStarted)
         state.downloadTaskID = savedInstanceState.getLong("downloadTaskID", state.downloadTaskID)
+        state.confirmationCode = savedInstanceState.getString("confirmationCode", state.confirmationCode)
+        state.confirmationCodeRequired = savedInstanceState.getBoolean("confirmationCodeRequired", state.confirmationCodeRequired)
     }
 
     private fun onPrevPressed() {
+        hideIme()
+
         if (currentFragment?.hasPrev == true) {
             val prevFrag = currentFragment?.createPrevFragment()
             if (prevFrag == null) {
@@ -143,13 +193,41 @@ class DownloadWizardActivity: BaseEuiccAccessActivity() {
     }
 
     private fun onNextPressed() {
-        if (currentFragment?.hasNext == true) {
-            currentFragment?.beforeNext()
-            val nextFrag = currentFragment?.createNextFragment()
-            if (nextFrag == null) {
-                finish()
-            } else {
-                showFragment(nextFrag, R.anim.slide_in_right, R.anim.slide_out_left)
+        hideIme()
+
+        nextButton.isEnabled = false
+        progressBar.visibility = View.VISIBLE
+        progressBar.isIndeterminate = true
+
+        lifecycleScope.launch(Dispatchers.Main) {
+            if (state.selectedLogicalSlot >= 0) {
+                try {
+                    // This is run on IO by default
+                    euiccChannelManager.withEuiccChannel(state.selectedLogicalSlot) { channel ->
+                        // Be _very_ sure that the channel we got is valid
+                        if (!channel.valid) throw EuiccChannelManager.EuiccChannelNotFoundException()
+                    }
+                } catch (e: EuiccChannelManager.EuiccChannelNotFoundException) {
+                    Toast.makeText(
+                        this@DownloadWizardActivity,
+                        R.string.download_wizard_slot_removed,
+                        Toast.LENGTH_LONG
+                    ).show()
+                    finish()
+                }
+            }
+
+            progressBar.visibility = View.GONE
+            nextButton.isEnabled = true
+
+            if (currentFragment?.hasNext == true) {
+                currentFragment?.beforeNext()
+                val nextFrag = currentFragment?.createNextFragment()
+                if (nextFrag == null) {
+                    finish()
+                } else {
+                    showFragment(nextFrag, R.anim.slide_in_right, R.anim.slide_out_left)
+                }
             }
         }
     }
@@ -174,6 +252,14 @@ class DownloadWizardActivity: BaseEuiccAccessActivity() {
         supportFragmentManager.beginTransaction().setCustomAnimations(enterAnim, exitAnim)
             .replace(R.id.step_fragment_container, nextFrag)
             .commit()
+
+        // Sync screen on state
+        if (nextFrag.keepScreenOn) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+
         refreshButtons()
     }
 
@@ -192,9 +278,18 @@ class DownloadWizardActivity: BaseEuiccAccessActivity() {
         }
     }
 
+    private fun hideIme() {
+        currentFocus?.let {
+            val imm = getSystemService(InputMethodManager::class.java)
+            imm.hideSoftInputFromWindow(it.windowToken, 0)
+        }
+    }
+
     abstract class DownloadWizardStepFragment : Fragment(), OpenEuiccContextMarker {
         protected val state: DownloadWizardState
             get() = (requireActivity() as DownloadWizardActivity).state
+
+        open val keepScreenOn = false
 
         abstract val hasNext: Boolean
         abstract val hasPrev: Boolean

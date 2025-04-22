@@ -5,7 +5,11 @@ internal object LpacJni {
         System.loadLibrary("lpac-jni")
     }
 
-    external fun createContext(apduInterface: ApduInterface, httpInterface: HttpInterface): Long
+    external fun createContext(
+        isdrAid: ByteArray,
+        apduInterface: ApduInterface,
+        httpInterface: HttpInterface
+    ): Long
     external fun destroyContext(handle: Long)
 
     external fun euiccInit(handle: Long): Int
@@ -19,7 +23,7 @@ internal object LpacJni {
     external fun es10cEnableProfile(handle: Long, iccid: String, refresh: Boolean): Int
     external fun es10cDisableProfile(handle: Long, iccid: String, refresh: Boolean): Int
     external fun es10cDeleteProfile(handle: Long, iccid: String): Int
-    external fun es10cSetNickname(handle: Long, iccid: String, nick: String): Int
+    external fun es10cSetNickname(handle: Long, iccid: String, nickNullTerminated: ByteArray): Int
 
     // es10b
     external fun es10bListNotification(handle: Long): Long // A native pointer to a linked list. Handle with linked list-related methods below. May be 0 (null)
@@ -62,6 +66,7 @@ internal object LpacJni {
     external fun notificationsFree(head: Long)
     // EuiccInfo2
     external fun euiccInfo2Free(info: Long)
+    external fun euiccInfo2GetSGP22Version(info: Long): String
     external fun euiccInfo2GetProfileVersion(info: Long): String
     external fun euiccInfo2GetEuiccFirmwareVersion(info: Long): String
     external fun euiccInfo2GetGlobalPlatformVersion(info: Long): String
